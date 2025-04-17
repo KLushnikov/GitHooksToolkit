@@ -1,0 +1,58 @@
+#!/bin/bash
+
+# Increments the patch version of a semantic version string (e.g., 1.2.3 → 1.2.4)
+update_version() {
+  version="$1"
+  IFS='.' read -r -a parts <<< "$version"  # Split version into array
+  parts[2]=$((parts[2] + 1))               # Increment patch version
+  echo "${parts[0]}.${parts[1]}.${parts[2]}"  # Rebuild version string
+}
+
+# Get list of staged files from Git
+changed_files=$(git diff --cached --name-only)
+projects_updated=false  # Flag to track if any project versions changed
+
+# Process all .csproj files in the repository (handles spaces in filenames)
+while IFS= read -r -d '' csproj; do
+  # Remove leading ./ and get project directory
+  csproj_clean="${csproj#./}"
+  project_dir=$(dirname "$csproj_clean")
+
+  # Escape special characters for regex matching
+  project_dir_escaped=$(sed 's/[.[\/^$*+?{}|]/\\&/g' <<< "$project_dir")
+  
+  # Check if any files in the project directory are staged for commit
+  if echo "$changed_files" | grep -qE "^${project_dir_escaped}(/|$)"; then
+    # Skip if the .csproj already has version changes in this commit
+    if git diff --cached -- "$csproj" | grep -q '<VersionPrefix>'; then
+      continue
+    fi
+  
+    # Extract current version from .csproj
+    version_prefix=$(grep -oP '<VersionPrefix>\K[\d.]+' "$csproj")
+    if [[ -n "$version_prefix" ]]; then
+      # Update version and modify .csproj
+      new_version=$(update_version "$version_prefix")
+      sed -i "s/<VersionPrefix>$version_prefix<\/VersionPrefix>/<VersionPrefix>$new_version<\/VersionPrefix>/" "$csproj"
+      git add "$csproj"  # Stage the modified .csproj
+      projects_updated=true  # Set flag to update solution version
+    fi
+  fi
+done < <(find . -name "*.csproj" -print0)  # Find all .csproj files safely
+
+# Update solution version if any projects were modified
+if [[ "$projects_updated" == true ]]; then
+  solution_version_file="Solution.props"
+  # Skip if solution version already changed in this commit
+  if git diff --cached -- "$solution_version_file" | grep -q '<SolutionVersion>'; then
+    :
+  else
+    # Extract and increment solution version
+    solution_version=$(grep -oP '<SolutionVersion>\K[\d.]+' "$solution_version_file")
+    if [[ -n "$solution_version" ]]; then
+      new_solution_version=$(update_version "$solution_version")
+      sed -i "s/<SolutionVersion>$solution_version<\/SolutionVersion>/<SolutionVersion>$new_solution_version<\/SolutionVersion>/" "$solution_version_file"
+      git add "$solution_version_file"  # Stage modified Solution.props
+    fi
+  fi
+fi
